@@ -6,6 +6,7 @@ cd $(dirname $0)/..
 . ./scripts/version.sh
 
 GO=${GO-go}
+"${GO}" env -w GOPROXY=https://goproxy.cn,direct
 
 PKG="github.com/k3s-io/k3s"
 PKG_CONTAINERD="github.com/containerd/containerd"
