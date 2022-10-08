@@ -64,4 +64,4 @@ CGO_ENABLED=0 "${GO}" build -tags "$TAGS" -ldflags "$LDFLAGS $STATIC" -o ${CMD_N
 
 stat ${CMD_NAME}
 
-./scripts/build-upload ${CMD_NAME} ${COMMIT}
+# ./scripts/build-upload ${CMD_NAME} ${COMMIT}

@@ -4,8 +4,10 @@ set -e
 cd $(dirname $0)/..
 . ./scripts/version.sh
 
+go env -w GOPROXY=https://goproxy.cn,direct
+
 echo Running: go mod tidy
-go mod tidy
+# go mod tidy
 
 echo Running: go generate
 go generate

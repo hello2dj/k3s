@@ -20,6 +20,7 @@ replace (
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.0.3
 	github.com/opencontainers/runtime-spec => github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417
 	github.com/opencontainers/selinux => github.com/opencontainers/selinux v1.10.1
+	github.com/rancher/dynamiclistener => github.com/hello2dj/dynamiclistener v0.3.4-c
 	github.com/rancher/wrangler => github.com/rancher/wrangler v0.8.11-0.20220211163748-d5a8ee98be5f
 	go.etcd.io/etcd => github.com/k3s-io/etcd v3.4.18-k3s1+incompatible
 	go.etcd.io/etcd/api/v3 => github.com/k3s-io/etcd/api/v3 v3.5.4-k3s1
@@ -103,7 +104,7 @@ require (
 	github.com/opencontainers/selinux v1.10.0
 	github.com/otiai10/copy v1.7.0
 	github.com/pkg/errors v0.9.1
-	github.com/rancher/dynamiclistener v0.3.4-0.20220721210816-8ebd77f8a45a
+	github.com/rancher/dynamiclistener v0.3.4
 	github.com/rancher/lasso v0.0.0-20210616224652-fc3ebd901c08
 	github.com/rancher/remotedialer v0.2.6-0.20220624190122-ea57207bf2b8
 	github.com/rancher/wharfie v0.5.1
