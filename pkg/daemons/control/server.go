@@ -21,9 +21,6 @@ import (
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 
@@ -81,7 +78,7 @@ func Server(ctx context.Context, cfg *config.Control) error {
 		}
 	}
 
-	if !cfg.DisableCCM {
+	if !cfg.DisableCCM || !cfg.DisableServiceLB {
 		if err := cloudControllerManager(ctx, cfg); err != nil {
 			return err
 		}
@@ -186,7 +183,11 @@ func apiServer(ctx context.Context, cfg *config.Control) error {
 	argsMap["kubelet-certificate-authority"] = runtime.ServerCA
 	argsMap["kubelet-client-certificate"] = runtime.ClientKubeAPICert
 	argsMap["kubelet-client-key"] = runtime.ClientKubeAPIKey
-	argsMap["kubelet-preferred-address-types"] = "InternalIP,ExternalIP,Hostname"
+	if cfg.FlannelExternalIP {
+		argsMap["kubelet-preferred-address-types"] = "ExternalIP,InternalIP,Hostname"
+	} else {
+		argsMap["kubelet-preferred-address-types"] = "InternalIP,ExternalIP,Hostname"
+	}
 	argsMap["requestheader-client-ca-file"] = runtime.RequestHeaderCA
 	argsMap["requestheader-allowed-names"] = deps.RequestHeaderCN
 	argsMap["proxy-client-cert-file"] = runtime.ClientAuthProxyCert
@@ -302,9 +303,12 @@ func cloudControllerManager(ctx context.Context, cfg *config.Control) error {
 	argsMap := map[string]string{
 		"profiling":                    "false",
 		"allocate-node-cidrs":          "true",
+		"leader-elect-resource-name":   version.Program + "-cloud-controller-manager",
 		"cloud-provider":               version.Program,
+		"cloud-config":                 runtime.CloudControllerConfig,
 		"cluster-cidr":                 util.JoinIPNets(cfg.ClusterIPRanges),
 		"configure-cloud-routes":       "false",
+		"controllers":                  "*,-route",
 		"kubeconfig":                   runtime.KubeConfigCloudController,
 		"authorization-kubeconfig":     runtime.KubeConfigCloudController,
 		"authentication-kubeconfig":    runtime.KubeConfigCloudController,
@@ -314,6 +318,13 @@ func cloudControllerManager(ctx context.Context, cfg *config.Control) error {
 	}
 	if cfg.NoLeaderElect {
 		argsMap["leader-elect"] = "false"
+	}
+	if cfg.DisableCCM {
+		argsMap["controllers"] = argsMap["controllers"] + ",-cloud-node,-cloud-node-lifecycle"
+		argsMap["secure-port"] = "0"
+	}
+	if cfg.DisableServiceLB {
+		argsMap["controllers"] = argsMap["controllers"] + ",-service"
 	}
 	args := config.GetArgs(argsMap, cfg.ExtraCloudControllerArgs)
 
@@ -360,37 +371,12 @@ func cloudControllerManager(ctx context.Context, cfg *config.Control) error {
 // If the CCM RBAC changes, the ResourceAttributes checked for by this function should
 // be modified to check for the most recently added privilege.
 func checkForCloudControllerPrivileges(ctx context.Context, runtime *config.ControlRuntime, timeout time.Duration) error {
-	restConfig, err := clientcmd.BuildConfigFromFlags("", runtime.KubeConfigAdmin)
-	if err != nil {
-		return err
-	}
-	authClient, err := authorizationv1client.NewForConfig(restConfig)
-	if err != nil {
-		return err
-	}
-	sar := &authorizationv1.SubjectAccessReview{
-		Spec: authorizationv1.SubjectAccessReviewSpec{
-			User: version.Program + "-cloud-controller-manager",
-			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Namespace: metav1.NamespaceSystem,
-				Verb:      "get",
-				Resource:  "configmaps",
-				Name:      "extension-apiserver-authentication",
-			},
-		},
-	}
-
-	err = wait.PollImmediate(time.Second, timeout, func() (bool, error) {
-		r, err := authClient.SubjectAccessReviews().Create(ctx, sar, metav1.CreateOptions{})
-		if err != nil {
-			return false, err
-		}
-		if r.Status.Allowed {
-			return true, nil
-		}
-		return false, nil
-	})
-	return err
+	return util.WaitForRBACReady(ctx, runtime.KubeConfigAdmin, timeout, authorizationv1.ResourceAttributes{
+		Namespace: metav1.NamespaceSystem,
+		Verb:      "*",
+		Resource:  "daemonsets",
+		Group:     "apps",
+	}, version.Program+"-cloud-controller-manager")
 }
 
 func waitForAPIServerHandlers(ctx context.Context, runtime *config.ControlRuntime) {

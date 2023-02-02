@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -12,7 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/k3s-io/helm-controller/pkg/helm"
+	helm "github.com/k3s-io/helm-controller/pkg/controllers/chart"
+	helmcommon "github.com/k3s-io/helm-controller/pkg/controllers/common"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
@@ -23,7 +23,6 @@ import (
 	"github.com/k3s-io/k3s/pkg/nodepassword"
 	"github.com/k3s-io/k3s/pkg/rootlessports"
 	"github.com/k3s-io/k3s/pkg/secretsencrypt"
-	"github.com/k3s-io/k3s/pkg/servicelb"
 	"github.com/k3s-io/k3s/pkg/static"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
@@ -187,37 +186,27 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 		return err
 	}
 
-	// apply SystemDefaultRegistry setting to Helm and ServiceLB before starting controllers
+	// apply SystemDefaultRegistry setting to Helm before starting controllers
 	if config.ControlConfig.SystemDefaultRegistry != "" {
 		helm.DefaultJobImage = config.ControlConfig.SystemDefaultRegistry + "/" + helm.DefaultJobImage
-		servicelb.DefaultLBImage = config.ControlConfig.SystemDefaultRegistry + "/" + servicelb.DefaultLBImage
 	}
 
 	if !config.ControlConfig.DisableHelmController {
 		helm.Register(ctx,
+			metav1.NamespaceAll,
+			helmcommon.Name,
 			sc.K8s,
 			sc.Apply,
+			util.BuildControllerEventRecorder(sc.K8s, helmcommon.Name, metav1.NamespaceAll),
 			sc.Helm.Helm().V1().HelmChart(),
+			sc.Helm.Helm().V1().HelmChart().Cache(),
 			sc.Helm.Helm().V1().HelmChartConfig(),
+			sc.Helm.Helm().V1().HelmChartConfig().Cache(),
 			sc.Batch.Batch().V1().Job(),
+			sc.Batch.Batch().V1().Job().Cache(),
 			sc.Auth.Rbac().V1().ClusterRoleBinding(),
 			sc.Core.Core().V1().ServiceAccount(),
 			sc.Core.Core().V1().ConfigMap())
-	}
-
-	if err := servicelb.Register(ctx,
-		sc.K8s,
-		sc.Apply,
-		sc.Apps.Apps().V1().DaemonSet(),
-		sc.Apps.Apps().V1().Deployment(),
-		sc.Core.Core().V1().Node(),
-		sc.Core.Core().V1().Pod(),
-		sc.Core.Core().V1().Service(),
-		sc.Core.Core().V1().Endpoints(),
-		config.ServiceLBNamespace,
-		!config.DisableServiceLB,
-		config.Rootless); err != nil {
-		return err
 	}
 
 	if config.ControlConfig.EncryptSecrets {
@@ -230,10 +219,10 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 		}
 	}
 
-	if config.Rootless {
+	if config.ControlConfig.Rootless {
 		return rootlessports.Register(ctx,
 			sc.Core.Core().V1().Service(),
-			!config.DisableServiceLB,
+			!config.ControlConfig.DisableServiceLB,
 			config.ControlConfig.HTTPSPort)
 	}
 
@@ -252,6 +241,7 @@ func stageFiles(ctx context.Context, sc *Context, controlConfig *config.Control)
 		"%{DEFAULT_LOCAL_STORAGE_PATH}%":  controlConfig.DefaultLocalStoragePath,
 		"%{SYSTEM_DEFAULT_REGISTRY}%":     registryTemplate(controlConfig.SystemDefaultRegistry),
 		"%{SYSTEM_DEFAULT_REGISTRY_RAW}%": controlConfig.SystemDefaultRegistry,
+		"%{PREFERRED_ADDRESS_TYPES}%":     addrTypesPrioTemplate(controlConfig.FlannelExternalIP),
 	}
 
 	skip := controlConfig.Skips
@@ -279,6 +269,16 @@ func registryTemplate(registry string) string {
 		return registry
 	}
 	return registry + "/"
+}
+
+// addressTypesTemplate prioritizes ExternalIP addresses if we are in the multi-cloud env where
+// cluster traffic flows over the external IPs only
+func addrTypesPrioTemplate(flannelExternal bool) string {
+	if flannelExternal {
+		return "ExternalIP,InternalIP,Hostname"
+	}
+
+	return "InternalIP,ExternalIP,Hostname"
 }
 
 // isHelmChartTraefikV1 checks for an existing HelmChart resource with spec.chart containing traefik-1,
@@ -378,7 +378,7 @@ func writeKubeConfig(certs string, config *Config) error {
 		port = config.ControlConfig.APIServerPort
 	}
 	url := fmt.Sprintf("https://%s:%d", ip, port)
-	kubeConfig, err := HomeKubeConfig(true, config.Rootless)
+	kubeConfig, err := HomeKubeConfig(true, config.ControlConfig.Rootless)
 	def := true
 	if err != nil {
 		kubeConfig = filepath.Join(config.ControlConfig.DataDir, "kubeconfig-"+version.Program+".yaml")
@@ -463,7 +463,7 @@ func writeToken(token, file, certs string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file, []byte(token+"\n"), 0600)
+	return os.WriteFile(file, []byte(token+"\n"), 0600)
 }
 
 func setNoProxyEnv(config *config.Control) error {
