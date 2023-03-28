@@ -17,6 +17,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/cli/kubectl"
 	"github.com/k3s-io/k3s/pkg/cli/secretsencrypt"
 	"github.com/k3s-io/k3s/pkg/cli/server"
+	"github.com/k3s-io/k3s/pkg/cli/token"
 	"github.com/k3s-io/k3s/pkg/configfilearg"
 	"github.com/k3s-io/k3s/pkg/containerd"
 	ctr2 "github.com/k3s-io/k3s/pkg/ctr"
@@ -48,6 +49,12 @@ func main() {
 		cmds.NewKubectlCommand(kubectl.Run),
 		cmds.NewCRICTL(crictl.Run),
 		cmds.NewCtrCommand(ctr.Run),
+		cmds.NewTokenCommands(
+			token.Create,
+			token.Delete,
+			token.Generate,
+			token.List,
+		),
 		cmds.NewEtcdSnapshotCommand(etcdsnapshot.Save,
 			cmds.NewEtcdSnapshotSubcommands(
 				etcdsnapshot.Delete,
@@ -66,7 +73,9 @@ func main() {
 		),
 		cmds.NewCertCommand(
 			cmds.NewCertSubcommands(
-				cert.Run),
+				cert.Rotate,
+				cert.RotateCA,
+			),
 		),
 		cmds.NewCompletionCommand(completion.Run),
 	}

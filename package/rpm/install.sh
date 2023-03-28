@@ -8,7 +8,7 @@ set -e
 #
 # Example:
 #   Installing a server without traefik:
-#     curl ... | INSTALL_K3S_EXEC="--no-deploy=traefik" sh -
+#     curl ... | INSTALL_K3S_EXEC="--disable=traefik" sh -
 #   Installing an agent to point at a server:
 #     curl ... | K3S_TOKEN=xxx K3S_URL=https://server-url:6443 sh -
 #
@@ -66,11 +66,11 @@ set -e
 #     of EXEC and script args ($@).
 #
 #     The following commands result in the same behavior:
-#       curl ... | INSTALL_K3S_EXEC="--no-deploy=traefik" sh -s -
-#       curl ... | INSTALL_K3S_EXEC="server --no-deploy=traefik" sh -s -
-#       curl ... | INSTALL_K3S_EXEC="server" sh -s - --no-deploy=traefik
-#       curl ... | sh -s - server --no-deploy=traefik
-#       curl ... | sh -s - --no-deploy=traefik
+#       curl ... | INSTALL_K3S_EXEC="--disable=traefik" sh -s -
+#       curl ... | INSTALL_K3S_EXEC="server --disable=traefik" sh -s -
+#       curl ... | INSTALL_K3S_EXEC="server" sh -s - --disable=traefik
+#       curl ... | sh -s - server --disable=traefik
+#       curl ... | sh -s - --disable=traefik
 #
 #   - INSTALL_K3S_NAME
 #     Name of systemd service to create, will default from the k3s exec command
@@ -94,7 +94,7 @@ if [ "$INSTALL_K3S_DEBUG" = "true" ]; then
 fi
 
 GITHUB_URL=https://github.com/k3s-io/k3s/releases
-STORAGE_URL=https://storage.googleapis.com/k3s-ci-builds
+STORAGE_URL=https://k3s-ci-builds.s3.amazonaws.com
 DOWNLOADER=
 
 # --- helper functions for logs ---
@@ -568,8 +568,8 @@ ip link delete flannel.1
 ip link delete flannel-v6.1
 ip link delete kube-ipvs0
 rm -rf /var/lib/cni/
-iptables-save | grep -v KUBE- | grep -v CNI- | grep -v flannel | iptables-restore
-ip6tables-save | grep -v KUBE- | grep -v CNI- | grep -v flannel | ip6tables-restore
+iptables-save | grep -v KUBE- | grep -v CNI- | grep -iv flannel | iptables-restore
+ip6tables-save | grep -v KUBE- | grep -v CNI- | grep -iv flannel | ip6tables-restore
 EOF
     $SUDO chmod 755 ${KILLALL_K3S_SH}
     $SUDO chown root:root ${KILLALL_K3S_SH}

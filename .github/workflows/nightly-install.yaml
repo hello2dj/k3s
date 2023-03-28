@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         channel: [v1.23]
-        vm: [centos-7, rocky-8, fedora-coreos, opensuse-leap, opensuse-microos, ubuntu-focal]
+        vm: [centos-7, rocky-8, fedora, opensuse-leap, ubuntu-focal]
       max-parallel: 2
     defaults:
       run:
@@ -21,15 +21,15 @@ jobs:
       INSTALL_K3S_CHANNEL: ${{ matrix.channel }}
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with: {fetch-depth: 1}
       - name: "Vagrant Cache"
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             ~/.vagrant.d/boxes
             ~/.vagrant.d/gems
-          key: install-${{ hashFiles(format('tests/install/{0}/Vagrantfile', matrix.vm)) }}
+          key: install-${{ matrix.vm }}-${{ hashFiles('tests/install/${{ matrix.vm }}/Vagrantfile') }}
         id: vagrant-cache
         continue-on-error: true
       - name: "Vagrant Plugin(s)"

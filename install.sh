@@ -92,7 +92,7 @@ set -o noglob
 #     Defaults to 'stable'.
 
 GITHUB_URL=https://github.com/k3s-io/k3s/releases
-STORAGE_URL=https://storage.googleapis.com/k3s-ci-builds
+STORAGE_URL=https://k3s-ci-builds.s3.amazonaws.com
 DOWNLOADER=
 
 # --- helper functions for logs ---
@@ -673,8 +673,8 @@ ip link delete flannel.1
 ip link delete flannel-v6.1
 ip link delete kube-ipvs0
 rm -rf /var/lib/cni/
-iptables-save | grep -v KUBE- | grep -v CNI- | grep -v flannel | iptables-restore
-ip6tables-save | grep -v KUBE- | grep -v CNI- | grep -v flannel | ip6tables-restore
+iptables-save | grep -v KUBE- | grep -v CNI- | grep -iv flannel | iptables-restore
+ip6tables-save | grep -v KUBE- | grep -v CNI- | grep -iv flannel | ip6tables-restore
 EOF
     $SUDO chmod 755 ${KILLALL_K3S_SH}
     $SUDO chown root:root ${KILLALL_K3S_SH}

@@ -64,6 +64,7 @@ type Server struct {
 	ServerURL                string
 	FlannelBackend           string
 	FlannelIPv6Masq          bool
+	FlannelExternalIP        bool
 	EgressSelectorMode       string
 	DefaultLocalStoragePath  string
 	DisableCCM               bool
@@ -207,7 +208,7 @@ var ServerFlags = []cli.Flag{
 	ClusterDomain,
 	cli.StringFlag{
 		Name:        "flannel-backend",
-		Usage:       "(networking) backend<=option1=val1,option2=val2> where backend is one of 'none', 'vxlan', 'ipsec', 'host-gw', 'wireguard-native', or 'wireguard' (deprecated)",
+		Usage:       "(networking) backend<=option1=val1,option2=val2> where backend is one of 'none', 'vxlan', 'ipsec' (deprecated), 'host-gw', 'wireguard-native', 'wireguard' (deprecated)",
 		Destination: &ServerConfig.FlannelBackend,
 		Value:       "vxlan",
 	},
@@ -215,6 +216,11 @@ var ServerFlags = []cli.Flag{
 		Name:        "flannel-ipv6-masq",
 		Usage:       "(networking) Enable IPv6 masquerading for pod",
 		Destination: &ServerConfig.FlannelIPv6Masq,
+	},
+	cli.BoolFlag{
+		Name:        "flannel-external-ip",
+		Usage:       "(networking) Use node external IP addresses for Flannel traffic",
+		Destination: &ServerConfig.FlannelExternalIP,
 	},
 	cli.StringFlag{
 		Name:        "egress-selector-mode",
@@ -246,11 +252,6 @@ var ServerFlags = []cli.Flag{
 		Usage:       "(client) Write kubeconfig with this mode",
 		Destination: &ServerConfig.KubeConfigMode,
 		EnvVar:      version.ProgramUpper + "_KUBECONFIG_MODE",
-	},
-	cli.BoolFlag{
-		Name:        "enable-pprof",
-		Usage:       "(experimental) Enable pprof endpoint on supervisor port",
-		Destination: &ServerConfig.EnablePProf,
 	},
 	ExtraAPIArgs,
 	ExtraEtcdArgs,
@@ -303,7 +304,7 @@ var ServerFlags = []cli.Flag{
 	},
 	&cli.StringFlag{
 		Name:        "etcd-snapshot-schedule-cron",
-		Usage:       "(db) Snapshot interval time in cron spec. eg. every 5 hours '* */5 * * *'",
+		Usage:       "(db) Snapshot interval time in cron spec. eg. every 5 hours '0 */5 * * *'",
 		Destination: &ServerConfig.EtcdSnapshotCron,
 		Value:       "0 */12 * * *",
 	},
@@ -456,11 +457,6 @@ var ServerFlags = []cli.Flag{
 	ExtraKubeletArgs,
 	ExtraKubeProxyArgs,
 	ProtectKernelDefaultsFlag,
-	cli.BoolFlag{
-		Name:        "rootless",
-		Usage:       "(experimental) Run rootless",
-		Destination: &ServerConfig.Rootless,
-	},
 	cli.StringFlag{
 		Name:        "agent-token",
 		Usage:       "(cluster) Shared secret used to join agents to the cluster, but not servers",
@@ -496,11 +492,7 @@ var ServerFlags = []cli.Flag{
 		Usage:       "(db) Path to snapshot file to be restored",
 		Destination: &ServerConfig.ClusterResetRestorePath,
 	},
-	cli.BoolFlag{
-		Name:        "secrets-encryption",
-		Usage:       "(experimental) Enable Secret encryption at rest",
-		Destination: &ServerConfig.EncryptSecrets,
-	},
+	PreferBundledBin,
 	cli.StringFlag{
 		Name:        "system-default-registry",
 		Usage:       "(image) Private registry to be used for all system images",
@@ -509,6 +501,22 @@ var ServerFlags = []cli.Flag{
 	},
 	&SELinuxFlag,
 	LBServerPortFlag,
+	cli.BoolFlag{
+		Name:        "secrets-encryption",
+		Usage:       "Enable secret encryption at rest",
+		Destination: &ServerConfig.EncryptSecrets,
+	},
+	// Experimental flags
+	cli.BoolFlag{
+		Name:        "rootless",
+		Usage:       "(experimental) Run rootless",
+		Destination: &ServerConfig.Rootless,
+	},
+	cli.BoolFlag{
+		Name:        "enable-pprof",
+		Usage:       "(experimental) Enable pprof endpoint on supervisor port",
+		Destination: &ServerConfig.EnablePProf,
+	},
 
 	// Hidden/Deprecated flags below
 

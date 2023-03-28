@@ -24,6 +24,7 @@ import (
 	cp "github.com/k3s-io/k3s/pkg/cloudprovider"
 	"github.com/k3s-io/k3s/pkg/daemons/agent"
 	daemonconfig "github.com/k3s-io/k3s/pkg/daemons/config"
+	types "github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/executor"
 	"github.com/k3s-io/k3s/pkg/nodeconfig"
 	"github.com/k3s-io/k3s/pkg/rootless"
@@ -38,10 +39,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/kubernetes"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 	toolswatch "k8s.io/client-go/tools/watch"
 	app2 "k8s.io/kubernetes/cmd/kube-proxy/app"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
@@ -96,6 +95,11 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	}
 
 	if !nodeConfig.NoFlannel {
+		if (nodeConfig.FlannelExternalIP) && (len(nodeConfig.AgentConfig.NodeExternalIPs) == 0) {
+			logrus.Warnf("Server has flannel-external-ip flag set but this node does not set node-external-ip. Flannel will use internal address when connecting to this node.")
+		} else if (nodeConfig.FlannelExternalIP) && (nodeConfig.FlannelBackend != types.FlannelBackendWireguardNative) && (nodeConfig.FlannelBackend != types.FlannelBackendIPSEC) {
+			logrus.Warnf("Flannel is using external addresses with an insecure backend: %v. Please consider using an encrypting flannel backend.", nodeConfig.FlannelBackend)
+		}
 		if err := flannel.Prepare(ctx, nodeConfig); err != nil {
 			return err
 		}
@@ -126,12 +130,12 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 		return errors.Wrap(err, "failed to wait for apiserver ready")
 	}
 
-	coreClient, err := coreClient(nodeConfig.AgentConfig.KubeConfigKubelet)
+	coreClient, err := util.GetClientSet(nodeConfig.AgentConfig.KubeConfigKubelet)
 	if err != nil {
 		return err
 	}
 
-	if err := configureNode(ctx, &nodeConfig.AgentConfig, coreClient.CoreV1().Nodes()); err != nil {
+	if err := configureNode(ctx, nodeConfig, coreClient.CoreV1().Nodes()); err != nil {
 		return err
 	}
 
@@ -202,15 +206,6 @@ func getConntrackConfig(nodeConfig *daemonconfig.Node) (*kubeproxyconfig.KubePro
 	return ctConfig, nil
 }
 
-func coreClient(cfg string) (kubernetes.Interface, error) {
-	restConfig, err := clientcmd.BuildConfigFromFlags("", cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	return kubernetes.NewForConfig(restConfig)
-}
-
 // RunStandalone bootstraps the executor, but does not run the kubelet or containerd.
 // This allows other bits of code that expect the executor to be set up properly to function
 // even when the agent is disabled. It will only return in case of error or context
@@ -247,7 +242,11 @@ func Run(ctx context.Context, cfg cmds.Agent) error {
 	}
 
 	if cfg.Rootless && !cfg.RootlessAlreadyUnshared {
-		if err := rootless.Rootless(cfg.DataDir); err != nil {
+		dualNode, err := utilsnet.IsDualStackIPStrings(cfg.NodeIP)
+		if err != nil {
+			return err
+		}
+		if err := rootless.Rootless(cfg.DataDir, dualNode); err != nil {
 			return err
 		}
 	}
@@ -262,6 +261,9 @@ func Run(ctx context.Context, cfg cmds.Agent) error {
 
 func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Proxy, error) {
 	agentDir := filepath.Join(cfg.DataDir, "agent")
+	clientKubeletCert := filepath.Join(agentDir, "client-kubelet.crt")
+	clientKubeletKey := filepath.Join(agentDir, "client-kubelet.key")
+
 	if err := os.MkdirAll(agentDir, 0700); err != nil {
 		return nil, err
 	}
@@ -272,8 +274,13 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 		return nil, err
 	}
 
+	options := []clientaccess.ValidationOption{
+		clientaccess.WithUser("node"),
+		clientaccess.WithClientCertificate(clientKubeletCert, clientKubeletKey),
+	}
+
 	for {
-		newToken, err := clientaccess.ParseAndValidateTokenForUser(proxy.SupervisorURL(), cfg.Token, "node")
+		newToken, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), cfg.Token, options...)
 		if err != nil {
 			logrus.Error(err)
 			select {
@@ -291,7 +298,8 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 
 // configureNode waits for the node object to be created, and if/when it does,
 // ensures that the labels and annotations are up to date.
-func configureNode(ctx context.Context, agentConfig *daemonconfig.Agent, nodes typedcorev1.NodeInterface) error {
+func configureNode(ctx context.Context, nodeConfig *daemonconfig.Node, nodes typedcorev1.NodeInterface) error {
+	agentConfig := &nodeConfig.AgentConfig
 	fieldSelector := fields.Set{metav1.ObjectNameField: agentConfig.NodeName}.String()
 	lw := &cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (object runtime.Object, e error) {
@@ -317,7 +325,7 @@ func configureNode(ctx context.Context, agentConfig *daemonconfig.Agent, nodes t
 		}
 
 		if !agentConfig.DisableCCM {
-			if annotations, changed := updateAddressAnnotations(agentConfig, node.Annotations); changed {
+			if annotations, changed := updateAddressAnnotations(nodeConfig, node.Annotations); changed {
 				node.Annotations = annotations
 				updateNode = true
 			}
@@ -328,13 +336,13 @@ func configureNode(ctx context.Context, agentConfig *daemonconfig.Agent, nodes t
 		}
 
 		// inject node config
-		if changed, err := nodeconfig.SetNodeConfigAnnotations(node); err != nil {
+		if changed, err := nodeconfig.SetNodeConfigAnnotations(nodeConfig, node); err != nil {
 			return false, err
 		} else if changed {
 			updateNode = true
 		}
 
-		if changed, err := nodeconfig.SetNodeConfigLabels(node); err != nil {
+		if changed, err := nodeconfig.SetNodeConfigLabels(nodeConfig, node); err != nil {
 			return false, err
 		} else if changed {
 			updateNode = true
@@ -394,7 +402,9 @@ func updateLegacyAddressLabels(agentConfig *daemonconfig.Agent, nodeLabels map[s
 	return nil, false
 }
 
-func updateAddressAnnotations(agentConfig *daemonconfig.Agent, nodeAnnotations map[string]string) (map[string]string, bool) {
+// updateAddressAnnotations updates the node annotations with important information about IP addresses of the node
+func updateAddressAnnotations(nodeConfig *daemonconfig.Node, nodeAnnotations map[string]string) (map[string]string, bool) {
+	agentConfig := &nodeConfig.AgentConfig
 	result := map[string]string{
 		cp.InternalIPKey: util.JoinIPs(agentConfig.NodeIPs),
 		cp.HostnameKey:   agentConfig.NodeName,
@@ -402,6 +412,16 @@ func updateAddressAnnotations(agentConfig *daemonconfig.Agent, nodeAnnotations m
 
 	if agentConfig.NodeExternalIP != "" {
 		result[cp.ExternalIPKey] = util.JoinIPs(agentConfig.NodeExternalIPs)
+		if nodeConfig.FlannelExternalIP {
+			for _, ipAddress := range agentConfig.NodeExternalIPs {
+				if utilsnet.IsIPv4(ipAddress) {
+					result[flannel.FlannelExternalIPv4Annotation] = ipAddress.String()
+				}
+				if utilsnet.IsIPv6(ipAddress) {
+					result[flannel.FlannelExternalIPv6Annotation] = ipAddress.String()
+				}
+			}
+		}
 	}
 
 	result = labels.Merge(nodeAnnotations, result)

@@ -13,6 +13,11 @@ metadata:
   labels:
     k8s-app: metrics-server
 spec:
+  revisionHistoryLimit: 0
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   selector:
     matchLabels:
       k8s-app: metrics-server
@@ -39,11 +44,11 @@ spec:
         emptyDir: {}
       containers:
       - name: metrics-server
-        image: %{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-metrics-server:v0.5.2
+        image: %{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-metrics-server:v0.6.2
         args:
         - --cert-dir=/tmp
-        - --secure-port=4443
-        - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+        - --secure-port=10250
+        - --kubelet-preferred-address-types=%{PREFERRED_ADDRESS_TYPES}%
         - --kubelet-use-node-status-port
         - --metric-resolution=15s
         resources:
@@ -52,7 +57,7 @@ spec:
             memory: 70Mi
         ports:
         - name: https
-          containerPort: 4443
+          containerPort: 10250
           protocol: TCP
         readinessProbe:
           httpGet:

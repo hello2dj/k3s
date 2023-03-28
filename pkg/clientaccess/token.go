@@ -7,19 +7,21 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/kubeadm"
 	"github.com/pkg/errors"
+	certutil "github.com/rancher/dynamiclistener/cert"
 	"github.com/sirupsen/logrus"
 )
 
 const (
 	tokenPrefix  = "K10"
-	tokenFormat  = "%s%s::%s:%s"
 	caHashLength = sha256.Size * 2
 
 	defaultClientTimeout = 10 * time.Second
@@ -39,45 +41,67 @@ var (
 	}
 )
 
-type OverrideURLCallback func(config []byte) (*url.URL, error)
-
+// Info contains fields that track parsed parts of a cluster join token
 type Info struct {
-	CACerts  []byte `json:"cacerts,omitempty"`
-	BaseURL  string `json:"baseurl,omitempty"`
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
+	*kubeadm.BootstrapTokenString
+
+	CACerts  []byte
+	BaseURL  string
+	Username string
+	Password string
+	CertFile string
+	KeyFile  string
 	caHash   string
 }
 
-// String returns the token data, templated according to the token format
+// ValidationOption is a callback to mutate the token prior to use
+type ValidationOption func(*Info)
+
+// WithClientCertificate configures certs and keys to be used
+// to authenticate the request.
+func WithClientCertificate(certFile, keyFile string) ValidationOption {
+	return func(i *Info) {
+		i.CertFile = certFile
+		i.KeyFile = keyFile
+	}
+}
+
+// WithUser overrides the username from the token with the provided value.
+func WithUser(username string) ValidationOption {
+	return func(i *Info) {
+		i.Username = username
+	}
+}
+
+// String returns the token data in K10 format
 func (i *Info) String() string {
-	return fmt.Sprintf(tokenFormat, tokenPrefix, hashCA(i.CACerts), i.Username, i.Password)
+	creds := i.Username + ":" + i.Password
+	if i.BootstrapTokenString != nil {
+		creds = i.BootstrapTokenString.String()
+	}
+	digest, _ := hashCA(i.CACerts)
+	return tokenPrefix + digest + "::" + creds
+}
+
+// Token returns the bootstrap token string, if available.
+func (i *Info) Token() string {
+	if i.BootstrapTokenString != nil {
+		return i.BootstrapTokenString.String()
+	}
+	return ""
 }
 
 // ParseAndValidateToken parses a token, downloads and validates the server's CA bundle,
 // and validates it according to the caHash from the token if set.
-func ParseAndValidateToken(server string, token string) (*Info, error) {
+func ParseAndValidateToken(server string, token string, options ...ValidationOption) (*Info, error) {
 	info, err := parseToken(token)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := info.setAndValidateServer(server); err != nil {
-		return nil, err
+	for _, option := range options {
+		option(info)
 	}
-
-	return info, nil
-}
-
-// ParseAndValidateToken parses a token with user override, downloads and
-// validates the server's CA bundle, and validates it according to the caHash from the token if set.
-func ParseAndValidateTokenForUser(server, token, username string) (*Info, error) {
-	info, err := parseToken(token)
-	if err != nil {
-		return nil, err
-	}
-
-	info.Username = username
 
 	if err := info.setAndValidateServer(server); err != nil {
 		return nil, err
@@ -94,17 +118,49 @@ func (i *Info) setAndValidateServer(server string) error {
 	return i.validateCAHash()
 }
 
-// validateCACerts returns a boolean indicating whether or not a CA bundle matches the provided hash,
-// and a string containing the hash of the CA bundle.
+// validateCACerts returns a boolean indicating whether or not a CA bundle matches the
+// provided hash, and a string containing the hash of the CA bundle.
 func validateCACerts(cacerts []byte, hash string) (bool, string) {
-	newHash := hashCA(cacerts)
+	newHash, _ := hashCA(cacerts)
 	return hash == newHash, newHash
 }
 
-// hashCA returns the hex-encoded SHA256 digest of a byte array.
-func hashCA(cacerts []byte) string {
-	digest := sha256.Sum256(cacerts)
-	return hex.EncodeToString(digest[:])
+// hashCA returns the hex-encoded SHA256 digest of a CA bundle.
+// If the certificate bundle contains only a single certificate, a legacy hash is generated from
+// the literal bytes of the file; usually a PEM-encoded self-signed cluster CA certificate.
+// If the certificate bundle contains more than one certificate, the hash is instead generated
+// from the DER-encoded root certificate in the bundle. This allows for rotating or renewing the
+// cluster CA, as long as the root CA remains the same.
+func hashCA(b []byte) (string, error) {
+	certs, err := certutil.ParseCertsPEM(b)
+	if err != nil {
+		return "", err
+	}
+
+	if len(certs) > 1 {
+		// Bundle contains more than one cert; find the root for the first cert in the bundle and
+		// hash the DER of this, instead of just hashing the raw bytes of the whole file.
+		roots := x509.NewCertPool()
+		intermediates := x509.NewCertPool()
+		for i, cert := range certs {
+			if i > 0 {
+				if len(cert.AuthorityKeyId) == 0 || bytes.Equal(cert.AuthorityKeyId, cert.SubjectKeyId) {
+					roots.AddCert(cert)
+				} else {
+					intermediates.AddCert(cert)
+				}
+			}
+		}
+		if chains, err := certs[0].Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates}); err == nil {
+			// It's possible but unlikely that there could be multiple valid chains back to a root
+			// certificate. Just use the first.
+			chain := chains[0]
+			b = chain[len(chain)-1].Raw
+		}
+	}
+
+	digest := sha256.Sum256(b)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 // ParseUsernamePassword returns the username and password portion of a token string,
@@ -125,13 +181,21 @@ func parseToken(token string) (*Info, error) {
 		return nil, errors.New("token must not be empty")
 	}
 
+	// Turn bare password or bootstrap token into full K10 token with empty CA hash,
+	// for consistent parsing in the section below.
 	if !strings.HasPrefix(token, tokenPrefix) {
-		token = fmt.Sprintf(tokenFormat, tokenPrefix, "", "", token)
+		_, err := kubeadm.NewBootstrapTokenString(token)
+		if err != nil {
+			token = tokenPrefix + ":::" + token
+		} else {
+			token = tokenPrefix + "::" + token
+		}
 	}
 
-	// Strip off the prefix
+	// Strip off the prefix.
 	token = token[len(tokenPrefix):]
 
+	// Split into CA hash and creds.
 	parts := strings.SplitN(token, "::", 2)
 	token = parts[0]
 	if len(parts) > 1 {
@@ -143,13 +207,19 @@ func parseToken(token string) (*Info, error) {
 		token = parts[1]
 	}
 
-	parts = strings.SplitN(token, ":", 2)
-	if len(parts) != 2 || len(parts[1]) == 0 {
-		return nil, errors.New("invalid token format")
+	// Try to parse creds as bootstrap token string; fall back to basic auth.
+	// If neither works, error.
+	bts, err := kubeadm.NewBootstrapTokenString(token)
+	if err != nil {
+		parts = strings.SplitN(token, ":", 2)
+		if len(parts) != 2 || len(parts[1]) == 0 {
+			return nil, errors.New("invalid token format")
+		}
+		info.Username = parts[0]
+		info.Password = parts[1]
+	} else {
+		info.BootstrapTokenString = bts
 	}
-
-	info.Username = parts[0]
-	info.Password = parts[1]
 
 	return &info, nil
 }
@@ -158,21 +228,30 @@ func parseToken(token string) (*Info, error) {
 // If the CA bundle is empty, it validates using the default http client using the OS CA bundle.
 // If the CA bundle is not empty but does not contain any valid certs, it validates using
 // an empty CA bundle (which will always fail).
-func GetHTTPClient(cacerts []byte) *http.Client {
+// If valid cert+key paths can be loaded from the provided paths, they are used for client cert auth.
+func GetHTTPClient(cacerts []byte, certFile, keyFile string) *http.Client {
 	if len(cacerts) == 0 {
 		return defaultClient
 	}
 
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(cacerts)
+	tlsConfig := &tls.Config{
+		RootCAs: x509.NewCertPool(),
+	}
+
+	tlsConfig.RootCAs.AppendCertsFromPEM(cacerts)
+
+	// Try to load certs from the provided cert and key. We ignore errors,
+	// as it is OK if the paths were empty or the files don't currently exist.
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err == nil {
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
 
 	return &http.Client{
 		Timeout: defaultClientTimeout,
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
-			TLSClientConfig: &tls.Config{
-				RootCAs: pool,
-			},
+			TLSClientConfig:   tlsConfig,
 		},
 	}
 }
@@ -183,8 +262,13 @@ func (i *Info) Get(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	u.Path = path
-	return get(u.String(), GetHTTPClient(i.CACerts), i.Username, i.Password)
+	p, err := url.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	p.Scheme = u.Scheme
+	p.Host = u.Host
+	return get(p.String(), GetHTTPClient(i.CACerts, i.CertFile, i.KeyFile), i.Username, i.Password, i.Token())
 }
 
 // Put makes a request to a subpath of info's BaseURL
@@ -193,8 +277,13 @@ func (i *Info) Put(path string, body []byte) error {
 	if err != nil {
 		return err
 	}
-	u.Path = path
-	return put(u.String(), body, GetHTTPClient(i.CACerts), i.Username, i.Password)
+	p, err := url.Parse(path)
+	if err != nil {
+		return err
+	}
+	p.Scheme = u.Scheme
+	p.Host = u.Host
+	return put(p.String(), body, GetHTTPClient(i.CACerts, i.CertFile, i.KeyFile), i.Username, i.Password, i.Token())
 }
 
 // setServer sets the BaseURL and CACerts fields of the Info by connecting to the server
@@ -252,13 +341,13 @@ func getCACerts(u url.URL) ([]byte, error) {
 	// This first request is expected to fail. If the server has
 	// a cert that can be validated using the default CA bundle, return
 	// success with no CA certs.
-	_, err := get(url, defaultClient, "", "")
+	_, err := get(url, defaultClient, "", "", "")
 	if err == nil {
 		return nil, nil
 	}
 
 	// Download the CA bundle using a client that does not validate certs.
-	cacerts, err := get(url, insecureClient, "", "")
+	cacerts, err := get(url, insecureClient, "", "", "")
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get CA certs")
 	}
@@ -266,7 +355,7 @@ func getCACerts(u url.URL) ([]byte, error) {
 	// Request the CA bundle again, validating that the CA bundle can be loaded
 	// and used to validate the server certificate. This should only fail if we somehow
 	// get an empty CA bundle. or if the dynamiclistener cert is incorrectly signed.
-	_, err = get(url, GetHTTPClient(cacerts), "", "")
+	_, err = get(url, GetHTTPClient(cacerts, "", ""), "", "", "")
 	if err != nil {
 		return nil, errors.Wrap(err, "CA cert validation failed")
 	}
@@ -276,13 +365,15 @@ func getCACerts(u url.URL) ([]byte, error) {
 
 // get makes a request to a url using a provided client, username, and password,
 // returning the response body.
-func get(u string, client *http.Client, username, password string) ([]byte, error) {
+func get(u string, client *http.Client, username, password, token string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	if username != "" {
+	if token != "" {
+		req.Header.Add("Authorization", "Bearer "+token)
+	} else if username != "" {
 		req.SetBasicAuth(username, password)
 	}
 
@@ -292,22 +383,24 @@ func get(u string, client *http.Client, username, password string) ([]byte, erro
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, fmt.Errorf("%s: %s", u, resp.Status)
 	}
 
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 // put makes a request to a url using a provided client, username, and password
 // only an error is returned
-func put(u string, body []byte, client *http.Client, username, password string) error {
+func put(u string, body []byte, client *http.Client, username, password, token string) error {
 	req, err := http.NewRequest(http.MethodPut, u, bytes.NewBuffer(body))
 	if err != nil {
 		return err
 	}
 
-	if username != "" {
+	if token != "" {
+		req.Header.Add("Authorization", "Bearer "+token)
+	} else if username != "" {
 		req.SetBasicAuth(username, password)
 	}
 
@@ -317,27 +410,41 @@ func put(u string, body []byte, client *http.Client, username, password string) 
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := ioutil.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("%s: %s %s", u, resp.Status, string(respBody))
 	}
 
 	return nil
 }
 
-func FormatToken(token, certFile string) (string, error) {
-	if len(token) == 0 {
-		return token, nil
+// FormatToken takes a username:password string or join token, and a path to a certificate bundle, and
+// returns a string containing the full K10 format token string. If the credentials are
+// empty, an empty token is returned. If the certificate bundle does not exist or does not
+// contain a valid bundle, an error is returned.
+func FormatToken(creds, certFile string) (string, error) {
+	if len(creds) == 0 {
+		return "", nil
 	}
 
-	certHash := ""
-	if len(certFile) > 0 {
-		b, err := ioutil.ReadFile(certFile)
-		if err != nil {
-			return "", nil
-		}
-		digest := sha256.Sum256(b)
-		certHash = tokenPrefix + hex.EncodeToString(digest[:]) + "::"
+	b, err := os.ReadFile(certFile)
+	if err != nil {
+		return "", err
 	}
-	return certHash + token, nil
+	return FormatTokenBytes(creds, b)
+}
+
+// FormatTokenBytes has the same interface as FormatToken, but accepts a byte slice instead
+// of file path.
+func FormatTokenBytes(creds string, b []byte) (string, error) {
+	if len(creds) == 0 {
+		return "", nil
+	}
+
+	digest, err := hashCA(b)
+	if err != nil {
+		return "", err
+	}
+
+	return tokenPrefix + digest + "::" + creds, nil
 }

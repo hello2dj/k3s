@@ -21,23 +21,29 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/flannel-io/flannel/backend"
-	"github.com/flannel-io/flannel/network"
+	"github.com/flannel-io/flannel/pkg/backend"
 	"github.com/flannel-io/flannel/pkg/ip"
-	"github.com/flannel-io/flannel/subnet/kube"
+	"github.com/flannel-io/flannel/pkg/iptables"
+	"github.com/flannel-io/flannel/pkg/subnet/kube"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 
 	// Backends need to be imported for their init() to get executed and them to register
-	_ "github.com/flannel-io/flannel/backend/extension"
-	_ "github.com/flannel-io/flannel/backend/hostgw"
-	_ "github.com/flannel-io/flannel/backend/ipsec"
-	_ "github.com/flannel-io/flannel/backend/vxlan"
-	_ "github.com/flannel-io/flannel/backend/wireguard"
+	_ "github.com/flannel-io/flannel/pkg/backend/extension"
+	_ "github.com/flannel-io/flannel/pkg/backend/hostgw"
+	_ "github.com/flannel-io/flannel/pkg/backend/ipsec"
+	_ "github.com/flannel-io/flannel/pkg/backend/vxlan"
+	_ "github.com/flannel-io/flannel/pkg/backend/wireguard"
 )
 
 const (
 	subnetFile = "/run/flannel/subnet.env"
+)
+
+var (
+	FlannelBaseAnnotation         = "flannel.alpha.coreos.com"
+	FlannelExternalIPv4Annotation = FlannelBaseAnnotation + "/public-ip-overwrite"
+	FlannelExternalIPv6Annotation = FlannelBaseAnnotation + "/public-ipv6-overwrite"
 )
 
 func flannel(ctx context.Context, flannelIface *net.Interface, flannelConf, kubeConfigFile string, flannelIPv6Masq bool, netMode int) error {
@@ -46,7 +52,7 @@ func flannel(ctx context.Context, flannelIface *net.Interface, flannelConf, kube
 		return err
 	}
 
-	sm, err := kube.NewSubnetManager(ctx, "", kubeConfigFile, "flannel.alpha.coreos.com", flannelConf, false)
+	sm, err := kube.NewSubnetManager(ctx, "", kubeConfigFile, FlannelBaseAnnotation, flannelConf, false)
 	if err != nil {
 		return err
 	}
@@ -70,14 +76,18 @@ func flannel(ctx context.Context, flannelIface *net.Interface, flannelConf, kube
 	}
 
 	if netMode == (ipv4+ipv6) || netMode == ipv4 {
-		go network.SetupAndEnsureIP4Tables(network.MasqRules(config.Network, bn.Lease()), 60)
-		go network.SetupAndEnsureIP4Tables(network.ForwardRules(config.Network.String()), 50)
+		iptables.CreateIP4Chain("nat", "FLANNEL-POSTRTG")
+		iptables.CreateIP4Chain("filter", "FLANNEL-FWD")
+		go iptables.SetupAndEnsureIP4Tables(iptables.MasqRules(config.Network, bn.Lease()), 60)
+		go iptables.SetupAndEnsureIP4Tables(iptables.ForwardRules(config.Network.String()), 50)
 	}
 
 	if flannelIPv6Masq && config.IPv6Network.String() != emptyIPv6Network {
 		logrus.Debugf("Creating IPv6 masquerading iptables rules for %s network", config.IPv6Network.String())
-		go network.SetupAndEnsureIP6Tables(network.MasqIP6Rules(config.IPv6Network, bn.Lease()), 60)
-		go network.SetupAndEnsureIP6Tables(network.ForwardRules(config.IPv6Network.String()), 50)
+		iptables.CreateIP6Chain("nat", "FLANNEL-POSTRTG")
+		iptables.CreateIP6Chain("filter", "FLANNEL-FWD")
+		go iptables.SetupAndEnsureIP6Tables(iptables.MasqIP6Rules(config.IPv6Network, bn.Lease()), 60)
+		go iptables.SetupAndEnsureIP6Tables(iptables.ForwardRules(config.IPv6Network.String()), 50)
 	}
 
 	if err := WriteSubnetFile(subnetFile, config.Network, config.IPv6Network, true, bn, netMode); err != nil {

@@ -8,7 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -101,7 +101,7 @@ RETRY:
 	}
 }
 
-type HTTPRequester func(u string, client *http.Client, username, password string) ([]byte, error)
+type HTTPRequester func(u string, client *http.Client, username, password, token string) ([]byte, error)
 
 func Request(path string, info *clientaccess.Info, requester HTTPRequester) ([]byte, error) {
 	u, err := url.Parse(info.BaseURL)
@@ -109,17 +109,19 @@ func Request(path string, info *clientaccess.Info, requester HTTPRequester) ([]b
 		return nil, err
 	}
 	u.Path = path
-	return requester(u.String(), clientaccess.GetHTTPClient(info.CACerts), info.Username, info.Password)
+	return requester(u.String(), clientaccess.GetHTTPClient(info.CACerts, info.CertFile, info.KeyFile), info.Username, info.Password, info.Token())
 }
 
 func getNodeNamedCrt(nodeName string, nodeIPs []net.IP, nodePasswordFile string) HTTPRequester {
-	return func(u string, client *http.Client, username, password string) ([]byte, error) {
+	return func(u string, client *http.Client, username, password, token string) ([]byte, error) {
 		req, err := http.NewRequest(http.MethodGet, u, nil)
 		if err != nil {
 			return nil, err
 		}
 
-		if username != "" {
+		if token != "" {
+			req.Header.Add("Authorization", "Bearer "+token)
+		} else if username != "" {
 			req.SetBasicAuth(username, password)
 		}
 
@@ -145,13 +147,13 @@ func getNodeNamedCrt(nodeName string, nodeIPs []net.IP, nodePasswordFile string)
 			return nil, fmt.Errorf("%s: %s", u, resp.Status)
 		}
 
-		return ioutil.ReadAll(resp.Body)
+		return io.ReadAll(resp.Body)
 	}
 }
 
 func ensureNodeID(nodeIDFile string) (string, error) {
 	if _, err := os.Stat(nodeIDFile); err == nil {
-		id, err := ioutil.ReadFile(nodeIDFile)
+		id, err := os.ReadFile(nodeIDFile)
 		return strings.TrimSpace(string(id)), err
 	}
 	id := make([]byte, 4, 4)
@@ -160,12 +162,12 @@ func ensureNodeID(nodeIDFile string) (string, error) {
 		return "", err
 	}
 	nodeID := hex.EncodeToString(id)
-	return nodeID, ioutil.WriteFile(nodeIDFile, []byte(nodeID+"\n"), 0644)
+	return nodeID, os.WriteFile(nodeIDFile, []byte(nodeID+"\n"), 0644)
 }
 
 func ensureNodePassword(nodePasswordFile string) (string, error) {
 	if _, err := os.Stat(nodePasswordFile); err == nil {
-		password, err := ioutil.ReadFile(nodePasswordFile)
+		password, err := os.ReadFile(nodePasswordFile)
 		return strings.TrimSpace(string(password)), err
 	}
 	password := make([]byte, 16, 16)
@@ -174,15 +176,15 @@ func ensureNodePassword(nodePasswordFile string) (string, error) {
 		return "", err
 	}
 	nodePassword := hex.EncodeToString(password)
-	return nodePassword, ioutil.WriteFile(nodePasswordFile, []byte(nodePassword+"\n"), 0600)
+	return nodePassword, os.WriteFile(nodePasswordFile, []byte(nodePassword+"\n"), 0600)
 }
 
 func upgradeOldNodePasswordPath(oldNodePasswordFile, newNodePasswordFile string) {
-	password, err := ioutil.ReadFile(oldNodePasswordFile)
+	password, err := os.ReadFile(oldNodePasswordFile)
 	if err != nil {
 		return
 	}
-	if err := ioutil.WriteFile(newNodePasswordFile, password, 0600); err != nil {
+	if err := os.WriteFile(newNodePasswordFile, password, 0600); err != nil {
 		logrus.Warnf("Unable to write password file: %v", err)
 		return
 	}
@@ -200,11 +202,11 @@ func getServingCert(nodeName string, nodeIPs []net.IP, servingCertFile, servingK
 
 	servingCert, servingKey := splitCertKeyPEM(servingCert)
 
-	if err := ioutil.WriteFile(servingCertFile, servingCert, 0600); err != nil {
+	if err := os.WriteFile(servingCertFile, servingCert, 0600); err != nil {
 		return nil, errors.Wrapf(err, "failed to write node cert")
 	}
 
-	if err := ioutil.WriteFile(servingKeyFile, servingKey, 0600); err != nil {
+	if err := os.WriteFile(servingKeyFile, servingKey, 0600); err != nil {
 		return nil, errors.Wrapf(err, "failed to write node key")
 	}
 
@@ -222,15 +224,15 @@ func getHostFile(filename, keyFile string, info *clientaccess.Info) error {
 		return err
 	}
 	if keyFile == "" {
-		if err := ioutil.WriteFile(filename, fileBytes, 0600); err != nil {
+		if err := os.WriteFile(filename, fileBytes, 0600); err != nil {
 			return errors.Wrapf(err, "failed to write cert %s", filename)
 		}
 	} else {
 		fileBytes, keyBytes := splitCertKeyPEM(fileBytes)
-		if err := ioutil.WriteFile(filename, fileBytes, 0600); err != nil {
+		if err := os.WriteFile(filename, fileBytes, 0600); err != nil {
 			return errors.Wrapf(err, "failed to write cert %s", filename)
 		}
-		if err := ioutil.WriteFile(keyFile, keyBytes, 0600); err != nil {
+		if err := os.WriteFile(keyFile, keyBytes, 0600); err != nil {
 			return errors.Wrapf(err, "failed to write key %s", filename)
 		}
 	}
@@ -263,10 +265,10 @@ func getNodeNamedHostFile(filename, keyFile, nodeName string, nodeIPs []net.IP, 
 	}
 	fileBytes, keyBytes := splitCertKeyPEM(fileBytes)
 
-	if err := ioutil.WriteFile(filename, fileBytes, 0600); err != nil {
+	if err := os.WriteFile(filename, fileBytes, 0600); err != nil {
 		return errors.Wrapf(err, "failed to write cert %s", filename)
 	}
-	if err := ioutil.WriteFile(keyFile, keyBytes, 0600); err != nil {
+	if err := os.WriteFile(keyFile, keyBytes, 0600); err != nil {
 		return errors.Wrapf(err, "failed to write key %s", filename)
 	}
 	return nil
@@ -320,8 +322,10 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 	if envInfo.Debug {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
-
-	info, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), envInfo.Token)
+	clientKubeletCert := filepath.Join(envInfo.DataDir, "agent", "client-kubelet.crt")
+	clientKubeletKey := filepath.Join(envInfo.DataDir, "agent", "client-kubelet.key")
+	withCert := clientaccess.WithClientCertificate(clientKubeletCert, clientKubeletKey)
+	info, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), envInfo.Token, withCert)
 	if err != nil {
 		return nil, err
 	}
@@ -399,8 +403,6 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 		return nil, err
 	}
 
-	clientKubeletCert := filepath.Join(envInfo.DataDir, "agent", "client-kubelet.crt")
-	clientKubeletKey := filepath.Join(envInfo.DataDir, "agent", "client-kubelet.key")
 	if err := getNodeNamedHostFile(clientKubeletCert, clientKubeletKey, nodeName, nodeIPs, newNodePasswordFile, info); err != nil {
 		return nil, err
 	}
@@ -438,6 +440,7 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 		ContainerRuntimeEndpoint: envInfo.ContainerRuntimeEndpoint,
 		FlannelBackend:           controlConfig.FlannelBackend,
 		FlannelIPv6Masq:          controlConfig.FlannelIPv6Masq,
+		FlannelExternalIP:        controlConfig.FlannelExternalIP,
 		EgressSelectorMode:       controlConfig.EgressSelectorMode,
 		ServerHTTPSPort:          controlConfig.HTTPSPort,
 		Token:                    info.String(),
@@ -446,6 +449,8 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 	nodeConfig.Images = filepath.Join(envInfo.DataDir, "agent", "images")
 	nodeConfig.AgentConfig.NodeName = nodeName
 	nodeConfig.AgentConfig.NodeConfigPath = nodeConfigPath
+	nodeConfig.AgentConfig.ClientKubeletCert = clientKubeletCert
+	nodeConfig.AgentConfig.ClientKubeletKey = clientKubeletKey
 	nodeConfig.AgentConfig.ServingKubeletCert = servingKubeletCert
 	nodeConfig.AgentConfig.ServingKubeletKey = servingKubeletKey
 	nodeConfig.AgentConfig.ClusterDNS = controlConfig.ClusterDNS
@@ -460,7 +465,6 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 	}
 	nodeConfig.AgentConfig.Snapshotter = envInfo.Snapshotter
 	nodeConfig.AgentConfig.IPSECPSK = controlConfig.IPSECPSK
-	nodeConfig.AgentConfig.StrongSwanDir = filepath.Join(envInfo.DataDir, "agent", "strongswan")
 	nodeConfig.Containerd.Config = filepath.Join(envInfo.DataDir, "agent", "etc", "containerd", "config.toml")
 	nodeConfig.Containerd.Root = filepath.Join(envInfo.DataDir, "agent", "containerd")
 	if !nodeConfig.Docker && nodeConfig.ContainerRuntimeEndpoint == "" {
@@ -484,9 +488,8 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 		}
 	}
 	nodeConfig.Containerd.Opt = filepath.Join(envInfo.DataDir, "agent", "containerd")
-	if !envInfo.Debug {
-		nodeConfig.Containerd.Log = filepath.Join(envInfo.DataDir, "agent", "containerd", "containerd.log")
-	}
+	nodeConfig.Containerd.Log = filepath.Join(envInfo.DataDir, "agent", "containerd", "containerd.log")
+	nodeConfig.Containerd.Debug = envInfo.Debug
 	applyContainerdStateAndAddress(nodeConfig)
 	nodeConfig.Containerd.Template = filepath.Join(envInfo.DataDir, "agent", "etc", "containerd", "config.toml.tmpl")
 	nodeConfig.Certificate = servingCert
@@ -605,7 +608,8 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 
 // getAPIServers attempts to return a list of apiservers from the server.
 func getAPIServers(ctx context.Context, node *config.Node, proxy proxy.Proxy) ([]string, error) {
-	info, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), node.Token)
+	withCert := clientaccess.WithClientCertificate(node.AgentConfig.ClientKubeletCert, node.AgentConfig.ClientKubeletKey)
+	info, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), node.Token, withCert)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +626,8 @@ func getAPIServers(ctx context.Context, node *config.Node, proxy proxy.Proxy) ([
 // getKubeProxyDisabled attempts to return the DisableKubeProxy setting from the server configuration data.
 // It first checks the server readyz endpoint, to ensure that the configuration has stabilized before use.
 func getKubeProxyDisabled(ctx context.Context, node *config.Node, proxy proxy.Proxy) (bool, error) {
-	info, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), node.Token)
+	withCert := clientaccess.WithClientCertificate(node.AgentConfig.ClientKubeletCert, node.AgentConfig.ClientKubeletKey)
+	info, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), node.Token, withCert)
 	if err != nil {
 		return false, err
 	}

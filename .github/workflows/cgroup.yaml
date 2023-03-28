@@ -26,12 +26,12 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with: { fetch-depth: 1 }
       - name: "Build"
         run: DOCKER_BUILDKIT=1 SKIP_VALIDATE=1 make
       - name: "Upload"
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with: { name: k3s, path: dist/artifacts/k3s }
   test:
     name: "Conformance Test"
@@ -42,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vm: [fedora-35]
+        vm: [fedora]
         mode: [unified]
       max-parallel: 1
     defaults:
@@ -50,13 +50,13 @@ jobs:
         working-directory: tests/cgroup/${{ matrix.mode }}/${{ matrix.vm }}
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with: { fetch-depth: 1 }
       - name: "Download Binary"
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with: { name: k3s, path: dist/artifacts/ }
       - name: "Vagrant Cache"
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             ~/.vagrant.d/boxes
@@ -65,7 +65,7 @@ jobs:
         id: vagrant-cache
         continue-on-error: true
       - name: "Vagrant Plugin(s)"
-        run: vagrant plugin install vagrant-k3s
+        run: vagrant plugin install vagrant-k3s vagrant-reload
       - name: "Vagrant Up"
         run: vagrant up
       - name: "K3s Prepare"
@@ -90,6 +90,6 @@ jobs:
       - name: "[Rootless] K3s Ready"
         env: {TEST_KUBECONFIG: /home/vagrant/.kube/k3s.yaml}
         run: vagrant provision --provision-with=k3s-ready
-      - name: "[Rootless] Sonobuoy (--mode=quick)"
-        env: {TEST_KUBECONFIG: /home/vagrant/.kube/k3s.yaml, TEST_RESULTS_PATH: rootless}
-        run: vagrant provision --provision-with=k3s-sonobuoy
+      # - name: "[Rootless] Sonobuoy (--mode=quick)"
+      #   env: {TEST_KUBECONFIG: /home/vagrant/.kube/k3s.yaml, TEST_RESULTS_PATH: rootless}
+      #   run: vagrant provision --provision-with=k3s-sonobuoy

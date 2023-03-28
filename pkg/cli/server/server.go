@@ -71,7 +71,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	if !cfg.DisableAgent && os.Getuid() != 0 && !cfg.Rootless {
-		return fmt.Errorf("must run as root unless --disable-agent is specified")
+		return fmt.Errorf("server must run as root, or with --rootless and/or --disable-agent")
 	}
 
 	if cfg.Rootless {
@@ -81,7 +81,11 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 		}
 		cfg.DataDir = dataDir
 		if !cfg.DisableAgent {
-			if err := rootless.Rootless(dataDir); err != nil {
+			dualNode, err := utilsnet.IsDualStackIPStrings(cmds.AgentConfig.NodeIP)
+			if err != nil {
+				return err
+			}
+			if err := rootless.Rootless(dataDir, dualNode); err != nil {
 				return err
 			}
 		}
@@ -95,7 +99,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 
 	serverConfig := server.Config{}
 	serverConfig.DisableAgent = cfg.DisableAgent
-	serverConfig.ControlConfig.Runtime = &config.ControlRuntime{AgentReady: agentReady}
+	serverConfig.ControlConfig.Runtime = config.NewRuntime(agentReady)
 	serverConfig.ControlConfig.Token = cfg.Token
 	serverConfig.ControlConfig.AgentToken = cfg.AgentToken
 	serverConfig.ControlConfig.JoinURL = cfg.ServerURL
@@ -114,8 +118,8 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.DataDir = cfg.DataDir
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
 	serverConfig.ControlConfig.KubeConfigMode = cfg.KubeConfigMode
-	serverConfig.Rootless = cfg.Rootless
-	serverConfig.ServiceLBNamespace = cfg.ServiceLBNamespace
+	serverConfig.ControlConfig.Rootless = cfg.Rootless
+	serverConfig.ControlConfig.ServiceLBNamespace = cfg.ServiceLBNamespace
 	serverConfig.ControlConfig.SANs = cfg.TLSSan
 	serverConfig.ControlConfig.BindAddress = cfg.BindAddress
 	serverConfig.ControlConfig.SupervisorPort = cfg.SupervisorPort
@@ -136,6 +140,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.AdvertisePort = cfg.AdvertisePort
 	serverConfig.ControlConfig.FlannelBackend = cfg.FlannelBackend
 	serverConfig.ControlConfig.FlannelIPv6Masq = cfg.FlannelIPv6Masq
+	serverConfig.ControlConfig.FlannelExternalIP = cfg.FlannelExternalIP
 	serverConfig.ControlConfig.EgressSelectorMode = cfg.EgressSelectorMode
 	serverConfig.ControlConfig.ExtraCloudControllerArgs = cfg.ExtraCloudControllerArgs
 	serverConfig.ControlConfig.DisableCCM = cfg.DisableCCM
@@ -203,18 +208,17 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	if serverConfig.ControlConfig.PrivateIP == "" && len(cmds.AgentConfig.NodeIP) != 0 {
-		// ignoring the error here is fine since etcd will fall back to the interface's IPv4 address
-		serverConfig.ControlConfig.PrivateIP, _, _ = util.GetFirstString(cmds.AgentConfig.NodeIP)
+		serverConfig.ControlConfig.PrivateIP = util.GetFirstValidIPString(cmds.AgentConfig.NodeIP)
 	}
 
 	// if not set, try setting advertise-ip from agent node-external-ip
 	if serverConfig.ControlConfig.AdvertiseIP == "" && len(cmds.AgentConfig.NodeExternalIP) != 0 {
-		serverConfig.ControlConfig.AdvertiseIP, _, _ = util.GetFirstString(cmds.AgentConfig.NodeExternalIP)
+		serverConfig.ControlConfig.AdvertiseIP = util.GetFirstValidIPString(cmds.AgentConfig.NodeExternalIP)
 	}
 
 	// if not set, try setting advertise-ip from agent node-ip
 	if serverConfig.ControlConfig.AdvertiseIP == "" && len(cmds.AgentConfig.NodeIP) != 0 {
-		serverConfig.ControlConfig.AdvertiseIP, _, _ = util.GetFirstString(cmds.AgentConfig.NodeIP)
+		serverConfig.ControlConfig.AdvertiseIP = util.GetFirstValidIPString(cmds.AgentConfig.NodeIP)
 	}
 
 	// if we ended up with any advertise-ips, ensure they're added to the SAN list;
@@ -296,7 +300,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	// the apiserver service does not yet support dual-stack operation
-	_, apiServerServiceIP, err := controlplane.ServiceIPRange(*serverConfig.ControlConfig.ServiceIPRange)
+	_, apiServerServiceIP, err := controlplane.ServiceIPRange(*serverConfig.ControlConfig.ServiceIPRanges[0])
 	if err != nil {
 		return err
 	}
@@ -362,15 +366,15 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 		}
 	}
 	if serverConfig.ControlConfig.Skips["servicelb"] {
-		serverConfig.DisableServiceLB = true
+		serverConfig.ControlConfig.DisableServiceLB = true
 	}
 
-	if serverConfig.ControlConfig.DisableCCM {
+	if serverConfig.ControlConfig.DisableCCM && serverConfig.ControlConfig.DisableServiceLB {
 		serverConfig.ControlConfig.Skips["ccm"] = true
 		serverConfig.ControlConfig.Disables["ccm"] = true
 	}
 
-	tlsMinVersionArg := getArgValueFromList("tls-min-version", cfg.ExtraAPIArgs)
+	tlsMinVersionArg := getArgValueFromList("tls-min-version", serverConfig.ControlConfig.ExtraAPIArgs)
 	serverConfig.ControlConfig.TLSMinVersion, err = kubeapiserverflag.TLSVersion(tlsMinVersionArg)
 	if err != nil {
 		return errors.Wrap(err, "invalid tls-min-version")
@@ -384,7 +388,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	// TLS config based on mozilla ssl-config generator
 	// https://ssl-config.mozilla.org/#server=golang&version=1.13.6&config=intermediate&guideline=5.4
 	// Need to disable the TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 Cipher for TLS1.2
-	tlsCipherSuitesArg := getArgValueFromList("tls-cipher-suites", cfg.ExtraAPIArgs)
+	tlsCipherSuitesArg := getArgValueFromList("tls-cipher-suites", serverConfig.ControlConfig.ExtraAPIArgs)
 	tlsCipherSuites := strings.Split(tlsCipherSuitesArg, ",")
 	for i := range tlsCipherSuites {
 		tlsCipherSuites[i] = strings.TrimSpace(tlsCipherSuites[i])
@@ -398,6 +402,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 			"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305",
 			"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305",
 		}
+		serverConfig.ControlConfig.ExtraAPIArgs = append(serverConfig.ControlConfig.ExtraAPIArgs, "tls-cipher-suites="+strings.Join(tlsCipherSuites, ","))
 	}
 	serverConfig.ControlConfig.TLSCipherSuites, err = kubeapiserverflag.TLSCipherSuites(tlsCipherSuites)
 	if err != nil {
@@ -482,7 +487,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	agentConfig.ServerURL = url
 	agentConfig.Token = token
 	agentConfig.DisableLoadBalancer = !serverConfig.ControlConfig.DisableAPIServer
-	agentConfig.DisableServiceLB = serverConfig.DisableServiceLB
+	agentConfig.DisableServiceLB = serverConfig.ControlConfig.DisableServiceLB
 	agentConfig.ETCDAgent = serverConfig.ControlConfig.DisableAPIServer
 	agentConfig.ClusterReset = serverConfig.ControlConfig.ClusterReset
 	agentConfig.Rootless = cfg.Rootless

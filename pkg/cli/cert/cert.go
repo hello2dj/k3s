@@ -1,21 +1,24 @@
 package cert
 
 import (
-	"errors"
-	"io/ioutil"
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/erikdubbelboer/gspt"
+	"github.com/k3s-io/k3s/pkg/bootstrap"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/control/deps"
 	"github.com/k3s-io/k3s/pkg/datadir"
 	"github.com/k3s-io/k3s/pkg/server"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/otiai10/copy"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
@@ -48,19 +51,31 @@ var services = []string{
 	version.Program + k3sServerService,
 }
 
-func commandSetup(app *cli.Context, cfg *cmds.Server, sc *server.Config) (string, string, error) {
+func commandSetup(app *cli.Context, cfg *cmds.Server, sc *server.Config) (string, error) {
 	gspt.SetProcTitle(os.Args[0])
 
-	sc.ControlConfig.DataDir = cfg.DataDir
-	sc.ControlConfig.Runtime = &config.ControlRuntime{}
 	dataDir, err := datadir.Resolve(cfg.DataDir)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	return filepath.Join(dataDir, "server"), filepath.Join(dataDir, "agent"), err
+	sc.ControlConfig.DataDir = filepath.Join(dataDir, "server")
+
+	if cfg.Token == "" {
+		fp := filepath.Join(sc.ControlConfig.DataDir, "token")
+		tokenByte, err := os.ReadFile(fp)
+		if err != nil {
+			return "", err
+		}
+		cfg.Token = string(bytes.TrimRight(tokenByte, "\n"))
+	}
+	sc.ControlConfig.Token = cfg.Token
+
+	sc.ControlConfig.Runtime = config.NewRuntime(nil)
+
+	return dataDir, nil
 }
 
-func Run(app *cli.Context) error {
+func Rotate(app *cli.Context) error {
 	if err := cmds.InitLogging(); err != nil {
 		return err
 	}
@@ -70,27 +85,26 @@ func Run(app *cli.Context) error {
 func rotate(app *cli.Context, cfg *cmds.Server) error {
 	var serverConfig server.Config
 
-	serverDataDir, agentDataDir, err := commandSetup(app, cfg, &serverConfig)
+	dataDir, err := commandSetup(app, cfg, &serverConfig)
 	if err != nil {
 		return err
 	}
 
-	serverConfig.ControlConfig.DataDir = serverDataDir
-	serverConfig.ControlConfig.Runtime = &config.ControlRuntime{}
 	deps.CreateRuntimeCertFiles(&serverConfig.ControlConfig)
 
 	if err := validateCertConfig(); err != nil {
 		return err
 	}
 
-	tlsBackupDir, err := backupCertificates(serverDataDir, agentDataDir)
+	agentDataDir := filepath.Join(dataDir, "agent")
+	tlsBackupDir, err := backupCertificates(serverConfig.ControlConfig.DataDir, agentDataDir)
 	if err != nil {
 		return err
 	}
 
 	if len(cmds.ServicesList) == 0 {
-		// detecting if the service is an agent or server
-		_, err := os.Stat(serverDataDir)
+		// detecting if the command is being run on an agent or server
+		_, err := os.Stat(serverConfig.ControlConfig.DataDir)
 		if err != nil {
 			if !os.IsNotExist(err) {
 				return err
@@ -153,8 +167,8 @@ func rotate(app *cli.Context, cfg *cmds.Server) error {
 				serverConfig.ControlConfig.Runtime.ClientCloudControllerCert,
 				serverConfig.ControlConfig.Runtime.ClientCloudControllerKey)
 		case version.Program + k3sServerService:
-			dynamicListenerRegenFilePath := filepath.Join(serverDataDir, "tls", "dynamic-cert-regenerate")
-			if err := ioutil.WriteFile(dynamicListenerRegenFilePath, []byte{}, 0600); err != nil {
+			dynamicListenerRegenFilePath := filepath.Join(serverConfig.ControlConfig.DataDir, "tls", "dynamic-cert-regenerate")
+			if err := os.WriteFile(dynamicListenerRegenFilePath, []byte{}, 0600); err != nil {
 				return err
 			}
 			logrus.Infof("Rotating dynamic listener certificate")
@@ -199,11 +213,11 @@ func rotate(app *cli.Context, cfg *cmds.Server) error {
 func copyFile(src, destDir string) error {
 	_, err := os.Stat(src)
 	if err == nil {
-		input, err := ioutil.ReadFile(src)
+		input, err := os.ReadFile(src)
 		if err != nil {
 			return err
 		}
-		return ioutil.WriteFile(filepath.Join(destDir, filepath.Base(src)), input, 0644)
+		return os.WriteFile(filepath.Join(destDir, filepath.Base(src)), input, 0644)
 	} else if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -253,5 +267,50 @@ func validateCertConfig() error {
 			return errors.New("Service " + s + " is not recognized")
 		}
 	}
+	return nil
+}
+
+func RotateCA(app *cli.Context) error {
+	if err := cmds.InitLogging(); err != nil {
+		return err
+	}
+	return rotateCA(app, &cmds.ServerConfig, &cmds.CertRotateCAConfig)
+}
+
+func rotateCA(app *cli.Context, cfg *cmds.Server, sync *cmds.CertRotateCA) error {
+	var serverConfig server.Config
+
+	_, err := commandSetup(app, cfg, &serverConfig)
+	if err != nil {
+		return err
+	}
+
+	info, err := clientaccess.ParseAndValidateToken(cmds.ServerConfig.ServerURL, serverConfig.ControlConfig.Token, clientaccess.WithUser("server"))
+	if err != nil {
+		return err
+	}
+
+	// Set up dummy server config for reading new bootstrap data from disk.
+	tmpServer := &config.Control{
+		Runtime: config.NewRuntime(nil),
+		DataDir: sync.CACertPath,
+	}
+	deps.CreateRuntimeCertFiles(tmpServer)
+
+	// Override these paths so that we don't get warnings when they don't exist, as the user is not expected to provide them.
+	tmpServer.Runtime.PasswdFile = "/dev/null"
+	tmpServer.Runtime.IPSECKey = "/dev/null"
+
+	buf := &bytes.Buffer{}
+	if err := bootstrap.ReadFromDisk(buf, &tmpServer.Runtime.ControlRuntimeBootstrap); err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("/v1-%s/cert/cacerts?force=%t", version.Program, sync.Force)
+	if err = info.Put(url, buf.Bytes()); err != nil {
+		return errors.Wrap(err, "see server log for details")
+	}
+
+	fmt.Println("certificates saved to datastore")
 	return nil
 }
