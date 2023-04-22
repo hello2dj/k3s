@@ -20,7 +20,7 @@ RUN apk -U --no-cache add bash git gcc musl-dev docker vim less file curl wget c
   apk -U --no-cache add mingw-w64-gcc; \
   fi
 
-RUN python3 -m pip install awscli
+# RUN python3 -m pip install awscli
 
 # RUN if [ "$(go env GOARCH)" = "arm64" ]; then                                                               \
 #   wget https://github.com/aquasecurity/trivy/releases/download/v0.25.3/trivy_0.25.3_Linux-ARM64.tar.gz && \
