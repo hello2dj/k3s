@@ -37,7 +37,7 @@ const (
 	aescbcKeySize  = 32
 
 	RequestHeaderCN = "system:auth-proxy"
-	certDuration    = time.Hour * 24 * 365 * 100
+	CertDuration    = time.Hour * 24 * 365 * 100
 )
 
 var (
@@ -586,7 +586,7 @@ func createClientCertKey(regen bool, commonName string, organization []string, a
 		CommonName:   commonName,
 		Organization: organization,
 		Usages:       extKeyUsage,
-		ExpiresAt:    certDuration,
+		ExpiresAt:    CertDuration,
 	}
 	if altNames != nil {
 		cfg.AltNames = *altNames
@@ -639,7 +639,7 @@ func createSigningCertKey(prefix, certFile, keyFile string) (bool, error) {
 
 	cfg := certutil.Config{
 		CommonName: fmt.Sprintf("%s-ca@%d", prefix, time.Now().Unix()),
-		ExpiresAt:  certDuration,
+		ExpiresAt:  CertDuration,
 	}
 
 	cert, err := certutil.NewSelfSignedCACert(cfg, caKey.(crypto.Signer))

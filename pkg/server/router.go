@@ -19,6 +19,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/bootstrap"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/daemons/control/deps"
 	"github.com/k3s-io/k3s/pkg/generated/clientset/versioned/scheme"
 	"github.com/k3s-io/k3s/pkg/nodepassword"
 	"github.com/k3s-io/k3s/pkg/util"
@@ -229,6 +230,7 @@ func servingKubeletCert(server *config.Control, keyFile string, auth nodePassBoo
 				DNSNames: []string{nodeName, "localhost"},
 				IPs:      ips,
 			},
+			ExpiresAt: deps.CertDuration,
 		}, key, caCert[0], caKey)
 		if err != nil {
 			sendError(err, resp)
@@ -269,6 +271,7 @@ func clientKubeletCert(server *config.Control, keyFile string, auth nodePassBoot
 			CommonName:   "system:node:" + nodeName,
 			Organization: []string{user.NodesGroup},
 			Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			ExpiresAt:    deps.CertDuration,
 		}, key, caCert[0], caKey)
 		if err != nil {
 			sendError(err, resp)
